@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-6 \
     libxrender1 \
     libxext6 \
-    libgconf-2-4 \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
     libgtk-3-0 \
