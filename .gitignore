@@ -9,3 +9,4 @@ wheels/
 # Virtual environments
 .venv
 .env
+logs_300_400pm.txt

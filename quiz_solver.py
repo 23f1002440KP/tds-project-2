@@ -33,7 +33,15 @@ class AutoSolver:
     def __init__(self, start_payload):
         self.email = start_payload['email']
         self.secret = start_payload['secret']
-        self.current_url = start_payload['url']
+        # Use a queue of URLs to process. This allows adding new URLs dynamically
+        # and processing them sequentially.
+        self.url_queue = []
+        self.processed_urls = set()
+        # seed initial URL
+        initial_url = start_payload.get('url')
+        if initial_url:
+            self.url_queue.append(initial_url)
+        self.current_url = None
         self.session = requests.Session()
         self.scraped_data_log = []
         
@@ -203,6 +211,27 @@ class AutoSolver:
             segments = [seg.lower() for seg in parsed.path.split('/') if seg]
             return 'submit' in segments
         except Exception:
+            return False
+
+    def enqueue_url(self, url):
+        """Add a new URL to the processing queue if not already seen or queued."""
+        try:
+            if not url:
+                return False
+            # Normalize minimally: strip fragments
+            parsed = urlparse(url)
+            normalized = parsed._replace(fragment='').geturl()
+            if normalized in self.processed_urls:
+                self.log(f"URL already processed, skipping enqueue: {normalized}")
+                return False
+            if normalized in self.url_queue:
+                self.log(f"URL already queued, skipping enqueue: {normalized}")
+                return False
+            self.url_queue.append(normalized)
+            self.log(f"Enqueued URL: {normalized}")
+            return True
+        except Exception as e:
+            self.log(f"Failed to enqueue URL {url}: {e}")
             return False
 
     def scrape_url(self, url):
@@ -491,10 +520,14 @@ class AutoSolver:
             return None
 
     def run(self):
-        """Main Loop"""
-        while self.current_url:
+        """Main Loop: process the URL queue until exhausted."""
+        while self.url_queue:
+            # pop from front (FIFO)
+            self.current_url = self.url_queue.pop(0)
+            # mark as processed to avoid re-adding
+            self.processed_urls.add(self.current_url)
             self.log(f"--- Processing Level: {self.current_url} ---")
-            
+
             # 1. Scrape Main Page
             scraped_data = self.scrape_url(self.current_url)
             
@@ -508,9 +541,14 @@ class AutoSolver:
                     if self.is_submit_url(link):
                         self.log(f"Skipping follow of submit URL: {link}")
                         continue
-                    # Only scrape internal links to append to context
-                    sub_data = self.scrape_url(link)
-                    scraped_data[f"sub_page_{link}"] = sub_data
+                    # Enqueue internal links to be scraped later (depth 1)
+                    self.enqueue_url(link)
+                    # Optionally, perform immediate scrape to append context
+                    try:
+                        sub_data = self.scrape_url(link)
+                        scraped_data[f"sub_page_{link}"] = sub_data
+                    except Exception as e:
+                        self.log(f"Failed to scrape linked page {link}: {e}")
 
             # 3. Save Scrape Data
             self.scraped_data_log.append(scraped_data)
@@ -531,26 +569,27 @@ class AutoSolver:
                         break
 
                 if next_url:
-                    self.current_url = next_url
-                    self.log("No LLM answer — moving to next discovered URL to continue.")
+                    self.enqueue_url(next_url)
+                    self.log("No LLM answer — enqueued next discovered URL to continue.")
                     continue
                 else:
-                    self.log("No answer and no next URL to proceed. Stopping.")
-                    break
+                    self.log("No answer and no next URL to proceed. Moving to next queued URL if any.")
+                    continue
 
             # 5. Submit
             result = self.submit_answer(answer, self.current_url)
 
             # 6. Check Result & Loop
             if result and result.get('correct', False):
-                self.log("Answer Correct!")
-                next_url = result.get('url')
-                if next_url:
-                    self.current_url = next_url
-                    self.log("Moving to next level...")
-                else:
-                    self.log("No new URL provided. Challenge Complete.")
-                    break
+                    self.log("Answer Correct!")
+                    next_url = result.get('url')
+                    if next_url:
+                        self.enqueue_url(next_url)
+                        self.log("Moving to next level (enqueued)...")
+                    else:
+                        self.log("No new URL provided. Challenge Complete.")
+                        # continue to any remaining queued URLs
+                        continue
             else:
                 # If server provided a reason for rejection, send it back to the LLM
                 reason = None
@@ -582,16 +621,15 @@ class AutoSolver:
                         if isinstance(result2, dict):
                             last_submission = result2
 
-                        if result2 and result2.get('correct', False):
-                            self.log("Revised answer correct!")
-                            next_url = result2.get('url')
-                            if next_url:
-                                self.current_url = next_url
-                                self.log("Moving to next level...")
-                            else:
-                                self.log("No new URL provided. Challenge Complete.")
-                                self.current_url = None
-                            break
+                            if result2 and result2.get('correct', False):
+                                self.log("Revised answer correct!")
+                                next_url = result2.get('url')
+                                if next_url:
+                                    self.enqueue_url(next_url)
+                                    self.log("Moving to next level (enqueued)...")
+                                else:
+                                    self.log("No new URL provided. Challenge Complete.")
+                                break
 
                         # Not correct: update reason and previous answer and retry
                         prev_answer = revised
@@ -615,12 +653,12 @@ class AutoSolver:
                             next_url = last_submission.get('url')
 
                         if next_url:
-                            self.current_url = next_url
-                            self.log("Exceeded revision attempts — moving to server-provided next URL.")
+                            self.enqueue_url(next_url)
+                            self.log("Exceeded revision attempts — enqueued server-provided next URL.")
                             continue
                         else:
-                            self.log("Exceeded revision attempts and no next URL provided. Stopping.")
-                            break
+                            self.log("Exceeded revision attempts and no next URL provided. Continuing with remaining queue if any.")
+                            continue
                 else:
                     # If the server did not provide a reason, try to continue if the server
                     # returned a next `url` or if the page had other internal links to follow.
@@ -635,12 +673,12 @@ class AutoSolver:
                                 break
 
                     if next_url:
-                        self.current_url = next_url
-                        self.log("Answer incorrect but moving to next URL to continue.")
+                        self.enqueue_url(next_url)
+                        self.log("Answer incorrect but enqueued next URL to continue.")
                         continue
                     else:
-                        self.log("Answer Incorrect and no reason provided. Stopping.")
-                        break
+                        self.log("Answer Incorrect and no reason provided. Continuing with remaining queue if any.")
+                        continue
 
 # --- EXECUTION ---
 if __name__ == "__main__":
