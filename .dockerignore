@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+downloads/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.git/
+.mypy_cache/
+last_run_*.json
+last_run_error.log
+tests/
